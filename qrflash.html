@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Animated QR Photo Beam</title>
+  <script src="https://cloudflare.com"></script>
+  <script src="https://unpkg.com"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #111; color: #fff; text-align: center; padding: 16px; margin: 0; }
+    .tabs { display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; }
+    button { padding: 12px 20px; font-size: 16px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
+    .tab-btn { background: #333; color: #fff; }
+    .tab-btn.active { background: #007bff; }
+    .panel { display: none; max-width: 420px; margin: 0 auto; }
+    .panel.active { display: block; }
+    #qr-box { background: #fff; padding: 16px; border-radius: 12px; display: inline-block; margin: 16px auto; min-height: 260px; min-width: 260px; }
+    #reader { width: 100%; border-radius: 12px; overflow: hidden; margin-top: 12px; }
+    progress { width: 100%; height: 22px; margin: 12px 0; }
+    img { max-width: 100%; border-radius: 8px; margin-top: 12px; border: 2px solid #007bff; }
+    .controls { display: flex; flex-direction: column; gap: 10px; background: #1e1e1e; padding: 14px; border-radius: 10px; }
+    label { font-size: 14px; color: #bbb; display: flex; justify-content: space-between; }
+  </style>
+</head>
+<body>
+
+  <h2>⚡ Animated QR Photo Beam</h2>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('send')">📤 Send Photo</button>
+    <button class="tab-btn" onclick="switchTab('receive')">📷 Receive Photo</button>
+  </div>
+
+  <!-- SENDER PANEL -->
+  <div id="send" class="panel active">
+    <div class="controls">
+      <input type="file" id="fileInput" accept="image/*">
+      <label>Image Width (Quality): <span id="wVal">320px</span></label>
+      <input type="range" id="widthRange" min="150" max="600" value="320" oninput="wVal.innerText=this.value+'px'">
+      <label>Flash Speed (FPS): <span id="fpsVal">6 FPS</span></label>
+      <input type="range" id="fpsRange" min="2" max="15" value="6" oninput="fpsVal.innerText=this.value+' FPS'; restartLoop()">
+    </div>
+    <div id="qr-box"></div>
+    <p id="sendStatus">Select an image to start flashing QR codes.</p>
+  </div>
+
+  <!-- RECEIVER PANEL -->
+  <div id="receive" class="panel">
+    <button style="background:#28a745;color:#fff;width:100%;" onclick="startScanner()">Start Camera Scanner</button>
+    <div id="reader"></div>
+    <progress id="progBar" value="0" max="100"></progress>
+    <p id="recStatus">Waiting to scan first QR frame...</p>
+    <div id="resultBox"></div>
+  </div>
+
+<script>
+  let chunks = [], currentIdx = 0, timer = null, received = {}, totalChunks = 0, scanner = null;
+  const CHUNK_SIZE = 280; // Characters per QR frame for reliable camera reading
+
+  function switchTab(tab) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById(tab).classList.add('active');
+    event.target.classList.add('active');
+    if (tab === 'send' && scanner) { scanner.stop().catch(()=>{}); }
+  }
+
+  // --- SENDER LOGIC ---
+  document.getElementById('fileInput').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      const img = new Image();
+      img.onload = function() {
+        const canvas = document.createElement('canvas');
+        const targetW = parseInt(document.getElementById('widthRange').value);
+        const scale = targetW / img.width;
+        canvas.width = targetW;
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        // Compress as WebP for smallest size & sharpest detail
+        const dataUrl = canvas.toDataURL('image/webp', 0.65);
+        chunks = [];
+        for (let i = 0; i < dataUrl.length; i += CHUNK_SIZE) {
+          chunks.push(dataUrl.slice(i, i + CHUNK_SIZE));
+        }
+        currentIdx = 0;
+        restartLoop();
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  function restartLoop() {
+    if (timer) clearInterval(timer);
+    if (!chunks.length) return;
+    const fps = parseInt(document.getElementById('fpsRange').value);
+    const qrBox = document.getElementById('qr-box');
+    timer = setInterval(() => {
+      qrBox.innerHTML = '';
+      // Packet format: index|total|payload
+      const packet = `${currentIdx}|${chunks.length}|${chunks[currentIdx]}`;
+      new QRCode(qrBox, { text: packet, width: 260, height: 260, correctLevel: QRCode.CorrectLevel.L });
+      document.getElementById('sendStatus').innerText = `Flashing frame ${currentIdx + 1} of ${chunks.length}`;
+      currentIdx = (currentIdx + 1) % chunks.length;
+    }, 1000 / fps);
+  }
+
+  // --- RECEIVER LOGIC ---
+  function startScanner() {
+    received = {}; totalChunks = 0;
+    document.getElementById('resultBox').innerHTML = '';
+    scanner = new Html5Qrcode("reader");
+    scanner.start(
+      { facingMode: "environment" },
+      { fps: 15, qrbox: { width: 250, height: 250 } },
+      (decodedText) => {
+        const parts = decodedText.split('|');
+        if (parts.length < 3) return;
+        const idx = parseInt(parts[0]);
+        const total = parseInt(parts[1]);
+        const payload = parts.slice(2).join('|');
+
+        if (totalChunks !== total) { received = {}; totalChunks = total; }
+        if (!received[idx]) {
+          received[idx] = payload;
+          const count = Object.keys(received).length;
+          document.getElementById('progBar').max = total;
+          document.getElementById('progBar').value = count;
+          document.getElementById('recStatus').innerText = `Caught ${count} / ${total} frames... Keep holding steady!`;
+
+          if (count === total) {
+            scanner.stop();
+            let fullDataUrl = '';
+            for (let i = 0; i < total; i++) fullDataUrl += received[i];
+            document.getElementById('recStatus').innerText = `✅ Transfer Complete! (${total} frames)`;
+            document.getElementById('resultBox').innerHTML = `<img src="${fullDataUrl}"><br><a href="${fullDataUrl}" download="beamed-photo.webp" style="color:#4da3ff;display:inline-block;margin-top:10px;">⬇️ Download Image</a>`;
+          }
+        }
+      }
+    ).catch(err => alert("Camera error (Note: phones require HTTPS or localhost for camera access): " + err));
+  }
+</script>
+</body>
+</html>
